@@ -1,0 +1,273 @@
+<html>
+
+<head>
+<meta http-equiv="Content-Language" content="en-us">
+<meta http-equiv="Content-Type" content="text/html; charset=windows-1252">
+<title>Hashcash - a Proof of Work Imple</title>
+</head>
+
+<body>
+
+<p>Hashcash - a Proof of Work Implementation</p>
+<h2>Introduction</h2>
+<p>&quot;Hashcash is a proof-of-work system used to limit email spam and 
+denial-of-service attacks, and more recently has become known for its use in 
+bitcoin (and other cryptocurrencies) as part of the mining algorithm. Hashcash 
+was proposed in March 1997 by Adam Back.&quot; (<a href="https://en.wikipedia.org/wiki/Hashcash">wikipedia</a>)&nbsp; 
+You can read Adam Back's paper <a href="http://www.hashcash.org/hashcash.pdf">
+here</a>.</p>
+<p>The idea is that a message, like an email, &quot;proves&quot; that it is it a 
+legitimate message by including hashing some string in such a manner that it 
+proves that a computer spent some time/energy on a particular algorithm -- in 
+particular, computing a <a href="https://en.wikipedia.org/wiki/SHA-1">SHA-1</a> 
+hash such that the first 20 bits of the hash are 0.&nbsp; Because this takes a 
+certain amount of computational time to find such a qualifying hash through 
+brute force, it costs the sender a small amount to find the hash, which is seen 
+as prohibitive for spammers that send large numbers of emails.&nbsp; A hashcash 
+can be viewed as &quot;a white-listing hint to help hashcash users avoid losing email 
+due to content based and blacklist based anti-spam devices.&quot; (<a href="http://www.hashcash.org/">hashcash.org</a>)&nbsp;
+</p>
+<p>This &quot;proof of work&quot; concept is primarily used nowadays as the bitcoin mining 
+function.&nbsp; These &quot;act as a vote in the blockchain evolution and validate 
+the blockchain transaction log.&quot;&nbsp; Or, to put it another way: &quot;Bitcoin uses 
+Hashcash to provide security from malicious alterations of the Blockchain, by 
+imposing a cost for alteration that a miner must hope to recoup through rewards 
+given for cooperation...In Bitcoin the difficulty of the Hashcash problem is 
+varied over time depending on the recent history of solution times, targeting a 
+ten minute solution on average.&quot; (<a href="https://thebookofbitcoin.github.io/html/mining/hashcash.html">The 
+Book of Bitcoin</a>)</p>
+<h3>Other Implementations</h3>
+<p>hashcash.org has a link to a C# implementation on
+<a href="https://sourceforge.net/projects/nhashcash/">SourceForge</a>.&nbsp; 
+However, in my testing of this algorithm, there are some bugs.&nbsp; A small bug 
+is in the date stamp:</p>
+<pre>string stampDate = date.ToString(&quot;yymmdd&quot;);</pre>
+<p>Oops, that's year - minute - day format!</p>
+<p>A more significant bug is that the resulting header frequently does not 
+verify with:</p>
+<pre>SHA1CryptoServiceProvider sha = new SHA1CryptoServiceProvider();
+byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(header));</pre>
+<p>It turns out that the resulting hash often has only the first 16 or 18 bits 
+set to 0, and I believe this is the result of an algorithmic problem in how the
+<a href="https://en.wikipedia.org/wiki/Base64">base64</a> value is computed with 
+regards to completing the octet.</p>
+<h2>Algorithm</h2>
+<p>A hashcash header has the following fields (<a href="https://en.wikipedia.org/wiki/Hashcash">wikipedia</a>):</p>
+<ul>
+	<li>version: (currently 1)</li>
+	<li>bits: the number of leading bits that are 0</li>
+	<li>timestamp: A date/time stamp (time is optional)</li>
+	<li>resource: the data string being transmitted, for example, an IP address, 
+	email address, or other data</li>
+	<li>extension: ignored in version 1</li>
+	<li>random seed: base-64 encoded random set of characters</li>
+	<li>counter: base-64 encoded binary counter between 0 and 2<sup>20</sup>, 
+	(1,048,576)</li>
+</ul>
+<p>If you code this, there are a few questions that come up and a flaw in the 
+algorithm.</p>
+<ol>
+	<li>How many characters should the random seed be?</li>
+<li>When encoding the binary counter, should it be encoded big or little endian?&nbsp; 
+Should leading zeros (big endian) or trailing zeros (little endian) be excluded 
+when converting an integer (4 bytes) to a byte array?</li>
+	<li>A more important issue is that many cases do not have a solution with a 
+	maximum counter value of 2<sup>20</sup>.&nbsp; I have seen a counter value 
+	of&nbsp; 8,069,934 (0x7B232E) required to come to a solution.</li>
+</ol>
+<p>My revised algorithm is:</p>
+<ul>
+	<li>the random seed is 8 characters</li>
+	<li>the counter starts at 0 and increments until a solution is found</li>
+	<li>the counter is converted to base64 from the 4 little endian bytes 
+	representing the integer.</li>
+</ul>
+<h2>Implementation</h2>
+<p>I certainly don't suggest that this algorithm is written efficiently, but 
+then again, since it was meant to consume CPU cycles, I'm not particularly 
+concerned about that.</p>
+<h3>Verification</h3>
+<p>Let's look first at how the header is verified:</p>
+<pre>public class HashCash
+{
+  public static bool Verify(string header)
+  {
+    // We assume the bits that are going to be 0 are going to be between 10 and 99.
+    int zbits = int.Parse(header.Substring(2, 2));
+    int bytesToCheck = zbits / 8;
+    int remainderBitsToCheck = zbits % 8;
+    byte[] zArray = Enumerable.Repeat((byte)0x00, bytesToCheck).ToArray();
+    byte remainderMask = (byte)(0xFF &lt;&lt; (8 - remainderBitsToCheck));
+    SHA1CryptoServiceProvider sha = new SHA1CryptoServiceProvider();
+    byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(header));
+
+    return hash.Take(bytesToCheck).SequenceEqual(zArray) &amp;&amp; ((hash[bytesToCheck] &amp; remainderMask) == 0);
+  }
+}</pre>
+<p>There are other ways to skin this cat, for example using a
+<a href="https://msdn.microsoft.com/en-us/library/system.collections.bitarray(v=vs.110).aspx">
+BitArray</a> but the above is the implementation that I chose.</p>
+<p>We can verify that header example on the wikipedia page like this:</p>
+<pre>var check = HashCash.Verify(&quot;1:20:1303030600:adam@cypherspace.org::McMybZIhxKXu57jd:ckvi&quot;);
+Console.WriteLine(check ? &quot;Passed Verification&quot; : &quot;Failed Verification&quot;);</pre>
+<p>This passes.&nbsp; Because it passes, we can have a certain degree of trust 
+that the message is real.&nbsp; Further validation can be done to improve the 
+validity of the message:</p>
+<ul>
+	<li>the number of zero bits used to compute the hash</li>
+	<li>the timestamp is within an acceptable range</li>
+	<li>the random seed is unique (not re-used)</li>
+</ul>
+<p>&nbsp;All of this helps to white-list the message.</p>
+<h3>Initialization</h3>
+<p>A few constructors offer some ways of initializing the header:</p>
+<pre>public HashCash(string resource, int zbits = 20)
+{
+  rand = GetRandomAlphaNumeric();
+  this.msgDate = DateTime.Now;
+  this.resource = resource;
+  this.zbits = zbits;
+  Initialize();
+}
+
+public HashCash(DateTime msgDate, string resource, int zbits = 20)
+{
+  rand = GetRandomAlphaNumeric();
+  this.msgDate = msgDate;
+  this.resource = resource;
+  this.zbits = zbits;
+  Initialize();
+}
+
+public HashCash(DateTime msgDate, string resource, string rand, int zbits = 20)
+{
+  this.rand = rand;
+  this.msgDate = msgDate;
+  this.resource = resource;
+  this.zbits = zbits;
+  Initialize();
+}</pre>
+<p>If you don't provide the randomized seed, one is computed for you:</p>
+<pre>public string GetRandomAlphaNumeric(int len = 8)
+{
+  var chars = &quot;ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789&quot;;
+
+  return new String(chars.Select(c =&gt; chars[rnd.Next(chars.Length)]).Take(len).ToArray());
+}</pre>
+<p>Internally, some values that are used all the time are computed:</p>
+<pre>private void Initialize()
+{
+  counter = 0;
+  sha = new SHA1CryptoServiceProvider();
+  bytesToCheck = zbits / 8;
+  remainderBitsToCheck = zbits % 8;
+  zArray = Enumerable.Repeat((byte)0x00, bytesToCheck).ToArray();
+  remainderMask = (byte)(0xFF &lt;&lt; (8 - remainderBitsToCheck));
+}</pre>
+<h3>Testing a Header</h3>
+<p>Once we've constructed the header, testing it involves verifying that the 
+first n bits are 0:</p>
+<pre>private bool AcceptableHeader(string header)
+{
+  byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(header));
+
+  return hash.Take(bytesToCheck).SequenceEqual(zArray) &amp;&amp; ((hash[bytesToCheck] &amp; remainderMask) == 0);
+}</pre>
+<h3>Computing the Header</h3>
+<p>This involves constructing the header and for each failure, incrementing the 
+counter until the hashed header passes the bit test:</p>
+<pre>public string Compute()
+{
+  string[] headerParts = new string[]
+  {
+    &quot;1&quot;,
+    zbits.ToString(),
+    msgDate.ToString(&quot;yyMMddhhmmss&quot;),
+    resource,
+    &quot;&quot;,
+    Convert.ToBase64String(Encoding.UTF8.GetBytes(rand)),
+    Convert.ToBase64String(BitConverter.GetBytes(counter))
+  };
+
+  string ret = String.Join(&quot;:&quot;, headerParts);
+  counter = int.MinValue;
+  Iterations = 0;
+
+  while (!AcceptableHeader(ret))
+  {
+    headerParts[COUNTER_IDX] = Convert.ToBase64String(BitConverter.GetBytes(counter));
+    ret = String.Join(&quot;:&quot;, headerParts);
+
+    // Failed 
+    if (counter == int.MaxValue)
+    {
+      throw new HashCashException(&quot;Failed to find solution.&quot;);
+    }
+
+    ++counter;
+    ++Iterations;
+  }
+
+  return ret;
+}</pre>
+<h2>Testing</h2>
+<p>I put together a simple test that performs the &quot;proof of work&quot; 100 times:</p>
+<pre>static void TestHashCash()
+{
+  var check = HashCash.Verify(&quot;1:20:1303030600:adam@cypherspace.org::McMybZIhxKXu57jd:ckvi&quot;);
+  Console.WriteLine(check ? &quot;Passed Verification&quot; : &quot;Failed Verification&quot;);
+
+  int totalTime = 0;
+
+  for (int i = 0; i &lt; iterations; i++)
+  {
+    try
+    {
+      HashCash hc = new HashCash(&quot;foo.bar@foobar.com&quot;);
+      DateTime start = DateTime.Now;
+      string header = hc.Compute();
+      DateTime stop = DateTime.Now;
+      bool ret = HashCash.Verify(header);
+
+      if (!ret)
+      {
+        throw new HashCashException(&quot;Verification failed.&quot;);
+      }
+
+      int ms = (int)((stop - start).TotalMilliseconds);
+      Console.WriteLine(i + &quot;-&gt; Time: &quot; + ms + &quot;ms Iterations = &quot; + hc.Iterations);
+      totalTime += ms;
+    }
+    catch (HashCashException ex)
+    {
+      Console.WriteLine(ex.Message);
+      break;
+    }
+  }
+
+  Console.WriteLine(&quot;Average time: &quot; + (int)(totalTime / iterations) + &quot;ms&quot;);
+}</pre>
+<p>Example output (the last 19 iterations):</p>
+<p><img border="0" src="img1.png" width="304" height="310"></p>
+<p>It certainly takes on average more than one second to compute an acceptable 
+hash!</p>
+<h2>Conclusion</h2>
+<p>I find this to be a really interesting -- it's sort of the opposite of 
+captcha.&nbsp; A hashcash verifies that the sender <i>is</i> a machine (no human 
+could ever perform this computation) but that: </p>
+<ol>
+	<li>The machine is not being used for spamming or other unsolicited messaging.</li>
+	<li>The machine sending the message is authenticating the message header (this 
+could be expanded to include the message body as well).</li>
+	<li>An approach like this can be used as a throttle, or governor, to prevent even 
+a legitimate program from overwhelming a server.</li>
+	<li>This &quot;proof of work&quot; algorithm has 
+been used to help prevent denial-of-service attacks.</li>
+</ol>
+<p>NHashCash (the sourceforge link I posted earlier) is also included but the 
+test for that has been commented out.</p>
+<p>&nbsp;</p>
+
+</body>
+
+</html>
